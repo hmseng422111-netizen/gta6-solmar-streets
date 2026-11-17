@@ -1,126 +1,141 @@
-// The player, Rio: on foot he walks, runs and fights; in a car he drives it. Entering a
-// car parks the player inside it; leaving puts him back on the street beside it. Combat on
-// foot is a punch up close and a pistol at range, with ammo to manage.
+// The player: on foot or behind the wheel.
+// On foot the player walks and runs, punches, and shoots. In a car the
+// player drives it. E enters the nearest car and exits it again; stealing a
+// car the player does not own is a crime that raises the wanted level.
 
-import { CAR, PLAYER } from './config.js';
-import { resolveBuildingCollision } from './city.js';
-import { carsTouch } from './vehicles.js';
+import {
+  PLAYER_WALK_SPEED, PLAYER_RUN_SPEED, PLAYER_RADIUS, PLAYER_MAX_HEALTH,
+  CAR_LENGTH, BULLET_SPEED, BULLET_RANGE, BULLET_DAMAGE,
+  PUNCH_RANGE, PUNCH_DAMAGE,
+} from './config.js';
+import { collideBuildings, clampToWorld } from './city.js';
+import { distanceToCar, stepDrivenCar } from './vehicles.js';
 
-export function createPlayer(x, y) {
+export function makePlayer(x, y) {
   return {
-    x,
-    y,
-    angle: 0,
-    health: PLAYER.health,
-    ammo: PLAYER.pistolAmmo,
-    inCar: null,
+    x, y,
+    angle: -Math.PI / 2,
+    health: PLAYER_MAX_HEALTH,
+    cash: 250,
+    onFoot: true,
+    car: null,
+    weapon: 'pistol',
     punchCooldown: 0,
     shootCooldown: 0,
     invulnerable: 0,
   };
 }
 
-/** Move the player on foot; returns true when he moved. */
-export function stepPlayerOnFoot(player, dt, city, input) {
-  const dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-  const dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
-  if (dx === 0 && dy === 0) return false;
-  const running = input.run;
-  const speed = running ? PLAYER.runSpeed : PLAYER.walkSpeed;
-  const length = Math.hypot(dx, dy);
-  player.x += (dx / length) * speed * dt;
-  player.y += (dy / length) * speed * dt;
-  player.angle = Math.atan2(dy, dx);
-  // The resolver moves the body it is given, so pass the player itself.
-  resolveBuildingCollision(city, player);
-  player.x = Math.max(20, Math.min(3580, player.x));
-  player.y = Math.max(20, Math.min(2580, player.y));
-  return true;
+export function stepPlayerOnFoot(player, dt, input, city) {
+  let mx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  let my = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+  const moving = mx !== 0 || my !== 0;
+  if (moving) {
+    const len = Math.sqrt(mx * mx + my * my);
+    mx /= len;
+    my /= len;
+    player.angle = Math.atan2(my, mx);
+    const speed = input.run ? PLAYER_RUN_SPEED : PLAYER_WALK_SPEED;
+    const nx = player.x + mx * speed * dt;
+    const ny = player.y + my * speed * dt;
+    const resolved = collideBuildings(city, nx, ny, PLAYER_RADIUS);
+    player.x = resolved.x;
+    player.y = resolved.y;
+  }
+  const clamped = clampToWorld(player.x, player.y, PLAYER_RADIUS + 4);
+  player.x = clamped.x;
+  player.y = clamped.y;
+  if (player.punchCooldown > 0) player.punchCooldown -= dt;
+  if (player.shootCooldown > 0) player.shootCooldown -= dt;
+  if (player.invulnerable > 0) player.invulnerable -= dt;
+  return moving;
 }
 
-/**
- * The nearest car the player can enter (parked, traffic or police), within reach and not
- * wrecked; null when none is close enough.
- */
-export function nearestEnterableCar(player, cars) {
+// Try to enter the nearest car within reach. Returns the car or null.
+// Stealing a car that is occupied or parked-but-owned counts as theft.
+export function nearestCarToEnter(player, cars, maxDist = 60) {
   let best = null;
-  let bestDist = 70;
-  for (let i = 0; i < cars.length; i += 1) {
-    const car = cars[i];
+  let bestD = maxDist;
+  for (const car of cars) {
     if (car.wrecked) continue;
-    const dist = Math.hypot(car.x - player.x, car.y - player.y);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = car;
-    }
+    const d = distanceToCar(player.x, player.y, car);
+    if (d < bestD) { bestD = d; best = car; }
   }
   return best;
 }
 
-/** Step out of the car onto the street beside it. */
-export function exitCar(player, car) {
-  player.inCar = null;
-  player.x = car.x - Math.sin(car.angle) * 46;
-  player.y = car.y + Math.cos(car.angle) * 46;
-  player.angle = car.angle;
+export function enterCar(player, car) {
+  const wasTheft = car.occupied || car.parked;
+  player.onFoot = false;
+  player.car = car;
+  car.occupied = true;
+  car.parked = false;
+  player.x = car.x;
+  player.y = car.y;
+  return wasTheft;
 }
 
-/** A punch: hits the nearest car or pedestrian in range, on a short cooldown. */
-export function punch(player, cars, peds) {
+export function exitCar(player) {
+  if (!player.car) return;
+  const car = player.car;
+  player.car = null;
+  player.onFoot = true;
+  player.x = car.x + Math.cos(car.angle + Math.PI / 2) * (CAR_LENGTH / 2 + 24);
+  player.y = car.y + Math.sin(car.angle + Math.PI / 2) * (CAR_LENGTH / 2 + 24);
+  const clamped = clampToWorld(player.x, player.y, PLAYER_RADIUS + 4);
+  player.x = clamped.x;
+  player.y = clamped.y;
+}
+
+export function stepPlayer(player, dt, input, city) {
+  if (player.onFoot) {
+    return stepPlayerOnFoot(player, dt, input, city);
+  }
+  stepDrivenCar(player.car, dt, input, city);
+  player.x = player.car.x;
+  player.y = player.car.y;
+  player.angle = player.car.angle;
+  if (player.shootCooldown > 0) player.shootCooldown -= dt;
+  return Math.abs(player.car.speed) > 10;
+}
+
+// Fire the pistol toward a world point. Returns a bullet or null.
+export function shoot(player, targetX, targetY) {
+  if (player.shootCooldown > 0 || player.weapon !== 'pistol') return null;
+  player.shootCooldown = 0.28;
+  const angle = Math.atan2(targetY - player.y, targetX - player.x);
+  return {
+    x: player.x + Math.cos(angle) * 22,
+    y: player.y + Math.sin(angle) * 22,
+    vx: Math.cos(angle) * BULLET_SPEED,
+    vy: Math.sin(angle) * BULLET_SPEED,
+    range: BULLET_RANGE,
+    damage: BULLET_DAMAGE,
+    angle,
+  };
+}
+
+// A punch hits the nearest pedestrian or police officer in range.
+export function punch(player, targets) {
   if (player.punchCooldown > 0) return null;
   player.punchCooldown = 0.45;
-  const reach = PLAYER.punchRange + 20;
-  for (let i = 0; i < cars.length; i += 1) {
-    const car = cars[i];
-    if (car.wrecked) continue;
-    if (Math.hypot(car.x - player.x, car.y - player.y) < reach) return { type: 'car', car };
-  }
-  for (let i = 0; i < peds.length; i += 1) {
-    const ped = peds[i];
-    if (Math.hypot(ped.x - player.x, ped.y - player.y) < reach) return { type: 'ped', ped };
-  }
-  return { type: 'air' };
-}
-
-/** A pistol shot toward a point: hits the first car or pedestrian near the line. */
-export function shoot(player, targetX, targetY, cars, peds) {
-  if (player.shootCooldown > 0 || player.ammo <= 0) return null;
-  player.shootCooldown = 0.28;
-  player.ammo -= 1;
-  player.angle = Math.atan2(targetY - player.y, targetX - player.x);
-  const dx = targetX - player.x;
-  const dy = targetY - player.y;
-  const length = Math.hypot(dx, dy) || 1;
-  const ux = dx / length;
-  const uy = dy / length;
   let best = null;
-  let bestAlong = PLAYER.pistolRange;
-  const scan = (x, y, kind, ref) => {
-    const along = (x - player.x) * ux + (y - player.y) * uy;
-    if (along < 0 || along > bestAlong) return;
-    const across = Math.abs((x - player.x) * uy - (y - player.y) * ux);
-    if (across < 26) {
-      bestAlong = along;
-      best = { kind, ref, x, y };
-    }
-  };
-  for (let i = 0; i < cars.length; i += 1) {
-    const car = cars[i];
-    if (!car.wrecked) scan(car.x, car.y, 'car', car);
+  let bestD = PUNCH_RANGE;
+  for (const t of targets) {
+    const dx = t.x - player.x;
+    const dy = t.y - player.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d < bestD) { bestD = d; best = t; }
   }
-  for (let i = 0; i < peds.length; i += 1) scan(peds[i].x, peds[i].y, 'ped', peds[i]);
-  return { hit: best, fromX: player.x, fromY: player.y, toX: player.x + ux * Math.min(bestAlong, PLAYER.pistolRange), toY: player.y + uy * Math.min(bestAlong, PLAYER.pistolRange) };
+  if (best) {
+    best.health = (best.health ?? 100) - PUNCH_DAMAGE;
+    if (best.health <= 0) best.state = 'down';
+  }
+  return best;
 }
 
-/** Tick the player's cooldowns down. */
-export function tickCooldowns(player, dt) {
-  player.punchCooldown = Math.max(0, player.punchCooldown - dt);
-  player.shootCooldown = Math.max(0, player.shootCooldown - dt);
-  player.invulnerable = Math.max(0, player.invulnerable - dt);
-}
-
-/** True when the player's car touches another car (a crash). */
-export function playerCarTouches(player, other) {
-  if (!player.inCar) return false;
-  return carsTouch(player.inCar, other);
+export function hurtPlayer(player, amount) {
+  if (player.invulnerable > 0) return;
+  player.health -= amount;
+  player.invulnerable = 0.6;
 }

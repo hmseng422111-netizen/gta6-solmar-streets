@@ -1,82 +1,166 @@
-// The wanted system: heat rises with crimes and falls when no police can see the player.
-// Stars are the floor of heat. Police cars spawn up to the star count, chase and ram; on
-// foot, a policeman who stays on the player long enough busts him. A wrecked car, or a
-// busted player, ends the run.
+// Police and the wanted system for Solmar Streets.
+// Crimes add heat; heat sets the wanted level from 0 to 5 stars. Police
+// cars spawn at the edge of the player's view and chase: they steer toward
+// the player, ram the player's car, and on foot they close in to make an
+// arrest. Stay out of every officer's sight and the heat cools off.
 
-import { POLICE, WANTED } from './config.js';
-import { createCar } from './vehicles.js';
+import {
+  WANTED_MAX, POLICE_TOP_SPEED, POLICE_SPAWN_INTERVAL,
+  POLICE_COLOR, ARREST_SECONDS, WANTED_DECAY_SECONDS, WORLD_W, WORLD_H,
+} from './config.js';
+import { makeCar } from './vehicles.js';
+import { nearestRoadPoint, collideBuildings } from './city.js';
 
-/** How many stars the current heat is worth, 0 to 5. */
-export function starsOf(heat) {
-  return Math.max(0, Math.min(WANTED.maxStars, Math.floor(heat)));
+const HEAT_PER_STAR = 100;
+// A police car counts as seeing the player inside this range.
+const SIGHT_RANGE = 500;
+// Reinforcements only arrive while the heat is fresh; after this long with
+// no new crime, no more cars spawn and the player can slip away.
+const FRESH_HEAT_SECONDS = 20;
+
+export function makePoliceState() {
+  return {
+    wanted: 0,
+    heat: 0,
+    cars: [],
+    spawnTimer: 0,
+    unseenTimer: 0,
+    arrestTimer: 0,
+    lastCrimeAt: -Infinity,
+    arrested: false,
+  };
 }
 
-/** Add heat for a crime, capped at the top of 5 stars. */
-export function addHeat(state, amount) {
-  state.heat = Math.min(WANTED.maxStars + 0.99, state.heat + amount);
+// Crimes the world reports. Each adds heat; the wanted level follows.
+export function addHeat(police, amount, now = 0) {
+  police.heat = Math.min(WANTED_MAX * HEAT_PER_STAR, police.heat + amount);
+  const level = Math.min(WANTED_MAX, Math.floor(police.heat / HEAT_PER_STAR));
+  if (level > police.wanted) police.wanted = level;
+  police.unseenTimer = 0;
+  police.lastCrimeAt = now;
 }
 
-/** Decay heat when no police car is near the player. */
-export function decayHeat(state, dt, nearestPoliceDist) {
-  if (nearestPoliceDist > 650) state.heat = Math.max(0, state.heat - WANTED.decayPerSecond * dt);
+export function wantedLevel(police) {
+  return police.wanted;
 }
 
-/** Spawn police cars until the road holds one per star, at a distance, on a road. */
-export function maintainPolice(state, dt, city, random) {
-  const want = starsOf(state.heat);
-  const police = state.police;
-  // Remove police that fell too far behind.
-  for (let i = police.length - 1; i >= 0; i -= 1) {
-    const car = police[i];
-    const dist = Math.hypot(car.x - state.player.x, car.y - state.player.y);
-    if (dist > POLICE.despawnDistance && want === 0) police.splice(i, 1);
+function spawnPoliceCar(police, player, rng) {
+  const edge = rng.int(0, 3);
+  const margin = 120;
+  let x;
+  let y;
+  const dist = rng.range(750, 1000);
+  if (edge === 0) { x = player.x - dist; y = player.y + rng.range(-400, 400); }
+  else if (edge === 1) { x = player.x + dist; y = player.y + rng.range(-400, 400); }
+  else if (edge === 2) { x = player.x + rng.range(-400, 400); y = player.y - dist; }
+  else { x = player.x + rng.range(-400, 400); y = player.y + dist; }
+  x = Math.max(margin, Math.min(WORLD_W - margin, x));
+  y = Math.max(margin, Math.min(WORLD_H - margin, y));
+  // Spawn on a road, so the car arrives driving, not through a building.
+  const road = nearestRoadPoint(x, y);
+  x = road.x;
+  y = road.y;
+  const car = makeCar(x, y, Math.atan2(player.y - y, player.x - x), {
+    color: POLICE_COLOR, type: 'police', occupied: true, parked: false,
+  });
+  car.speed = POLICE_TOP_SPEED * 0.7;
+  police.cars.push(car);
+  return car;
+}
+
+function angleDiff(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+export function stepPolice(police, dt, player, rng, city, now = 0) {
+  // How many cars the wanted level calls for. Reinforcements only arrive
+  // while the heat is fresh.
+  const wantedCount = police.wanted === 0 ? 0 : Math.min(2 + police.wanted, 7);
+  police.spawnTimer -= dt;
+  const fresh = now - police.lastCrimeAt < FRESH_HEAT_SECONDS;
+  if (police.cars.length < wantedCount && police.spawnTimer <= 0 && fresh) {
+    spawnPoliceCar(police, player, rng);
+    police.spawnTimer = POLICE_SPAWN_INTERVAL;
   }
-  if (want === 0) return;
-  let alive = 0;
-  for (let i = 0; i < police.length; i += 1) if (!police[i].wrecked) alive += 1;
-  if (alive >= want) return;
-  state.spawnTimer -= dt;
-  if (state.spawnTimer > 0) return;
-  state.spawnTimer = 1.6;
-  const angle = random.range(0, Math.PI * 2);
-  const x = state.player.x + Math.cos(angle) * POLICE.spawnDistance;
-  const y = state.player.y + Math.sin(angle) * POLICE.spawnDistance;
-  const car = createCar(random, { x, y, police: true, color: '#2b6cb0' });
-  car.targetSpeed = POLICE.chaseSpeed;
-  police.push(car);
-}
 
-/**
- * Police ramming and busting. Returns 'busted' when the player is caught, 'ram' when a
- * police car hit the player's car this step, else null. `onFootTimer` tracks how long a
- * policeman has stayed on the player on foot.
- */
-export function policeContact(state, dt) {
-  const player = state.player;
-  const px = player.inCar ? player.inCar.x : player.x;
-  const py = player.inCar ? player.inCar.y : player.y;
-  let nearest = Infinity;
-  for (let i = 0; i < state.police.length; i += 1) {
-    const car = state.police[i];
-    if (car.wrecked) continue;
-    const dist = Math.hypot(car.x - px, car.y - py);
-    if (dist < nearest) nearest = dist;
-    if (player.inCar) {
-      if (dist < 52 && car.speed > 120) {
-        player.inCar.health -= POLICE.ramDamage;
-        car.speed *= 0.5;
-        if (player.inCar.health <= 0) {
-          player.inCar.wrecked = true;
-          return 'wrecked';
-        }
-        return 'ram';
+  let anySeesPlayer = false;
+  for (const car of police.cars) {
+    const dx = player.x - car.x;
+    const dy = player.y - car.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < SIGHT_RANGE) anySeesPlayer = true;
+
+    // Steer toward the player and drive at them.
+    const target = Math.atan2(dy, dx);
+    const diff = angleDiff(target, car.angle);
+    car.angle += Math.max(-3.2 * dt, Math.min(3.2 * dt, diff));
+    const wantSpeed = dist > 120 ? POLICE_TOP_SPEED : POLICE_TOP_SPEED * 0.55;
+    car.speed += (wantSpeed - car.speed) * Math.min(1, dt * 1.5);
+    car.x += Math.cos(car.angle) * car.speed * dt;
+    car.y += Math.sin(car.angle) * car.speed * dt;
+    // Buildings are solid for police too: they slow down and slide along
+    // them instead of driving straight through the city.
+    const resolved = collideBuildings(city, car.x, car.y, 24);
+    if (resolved.hit) car.speed *= 0.6;
+    car.x = resolved.x;
+    car.y = resolved.y;
+
+    // Ramming the player's car damages it; touching the player on foot
+    // starts an arrest.
+    if (player.car && dist < 52 && Math.abs(car.speed) > 60) {
+      player.car.damage = (player.car.damage || 0) + 1;
+      car.speed *= 0.5;
+      if (player.car.damage >= 6) {
+        player.car.wrecked = true;
+        player.car.smoke = 1;
       }
-    } else if (dist < 46) {
-      state.bustTimer += dt;
-      if (state.bustTimer >= WANTED.bustSeconds) return 'busted';
+    }
+    if (player.onFoot && dist < 46) {
+      police.arrestTimer += dt;
+      if (police.arrestTimer >= ARREST_SECONDS) {
+        police.arrested = true;
+      }
     }
   }
-  if (nearest > 60) state.bustTimer = 0;
-  state.nearestPoliceDist = nearest;
-  return null;
+
+  // Cars that fell far behind despawn.
+  police.cars = police.cars.filter((car) => {
+    const dx = car.x - player.x;
+    const dy = car.y - player.y;
+    return Math.sqrt(dx * dx + dy * dy) < 1600;
+  });
+
+  if (police.wanted > 0) {
+    if (anySeesPlayer) {
+      police.unseenTimer = 0;
+      if (player.onFoot) police.arrestTimer = Math.max(0, police.arrestTimer - dt * 0.5);
+    } else {
+      police.unseenTimer += dt;
+      if (police.unseenTimer >= WANTED_DECAY_SECONDS) {
+        police.heat = Math.max(0, police.heat - HEAT_PER_STAR);
+        police.wanted = Math.min(WANTED_MAX, Math.floor(police.heat / HEAT_PER_STAR));
+        police.unseenTimer = 0;
+      }
+    }
+  }
+  if (player.onFoot) {
+    const near = police.cars.some((car) => {
+      const dx = car.x - player.x;
+      const dy = car.y - player.y;
+      return Math.sqrt(dx * dx + dy * dy) < 46;
+    });
+    if (!near) police.arrestTimer = 0;
+  }
+}
+
+export function clearWanted(police) {
+  police.wanted = 0;
+  police.heat = 0;
+  police.cars = [];
+  police.arrestTimer = 0;
+  police.unseenTimer = 0;
+  police.lastCrimeAt = -Infinity;
 }

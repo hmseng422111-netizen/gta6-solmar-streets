@@ -1,51 +1,70 @@
-// Pedestrians: they stroll the sidewalks, cross at intersections, and run from gunfire.
-// A pedestrian is a point with a heading and a walk speed; a scared one runs twice as fast
-// and, after a while, calms down. One of them may be a taxi fare: stand next to a pedestrian
-// with a "!" over their head and press E to pick them up.
+// Pedestrians for Solmar Streets.
+// People wander the sidewalks beside the roads, keep out of buildings, and
+// scatter when a car comes at them or a gun goes off. A pedestrian flagged
+// as a taxi customer waits at the kerb until a taxi pulls up.
 
-import { randomSidewalkPoint } from './city.js';
+import { PED_COUNT, PED_SPEED, WORLD_W, WORLD_H } from './config.js';
+import { roadCenterX, roadCenterY, collideBuildings, clampToWorld } from './city.js';
 
-const PED_COLORS = ['#f2e6d8', '#e8b48a', '#8a6f5a', '#d8a0a0', '#a0c4d8', '#c4d8a0'];
+const SHIRT_COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#9b59b6', '#e67e22', '#ecf0f1', '#1abc9c'];
 
-export function createPedestrian(random, x, y) {
-  const point = x !== undefined ? { x, y } : randomSidewalkPoint(random);
+export function makePedestrian(x, y, rng) {
   return {
-    x: point.x,
-    y: point.y,
-    angle: random.range(0, Math.PI * 2),
-    speed: random.range(45, 75),
-    color: random.pick(PED_COLORS),
-    scared: 0,
-    fare: false,
-    retarget: 0,
+    x, y,
+    angle: rng.range(0, Math.PI * 2),
+    speed: PED_SPEED * rng.range(0.7, 1.3),
+    color: rng.pick(SHIRT_COLORS),
+    state: 'walk',
+    waitTime: rng.range(1, 5),
+    taxiCustomer: false,
+    fleeTime: 0,
   };
 }
 
-/** Walk a pedestrian; a scared one runs away from the scare point. */
-export function stepPedestrian(ped, dt, random, scareX, scareY) {
-  if (ped.scared > 0) {
-    ped.scared -= dt;
-    const away = Math.atan2(ped.y - scareY, ped.x - scareX);
-    ped.angle = away;
-    ped.x += Math.cos(away) * ped.speed * 2 * dt;
-    ped.y += Math.sin(away) * ped.speed * 2 * dt;
-    return;
+export function spawnPedestrians(rng) {
+  const peds = [];
+  for (let i = 0; i < PED_COUNT; i += 1) {
+    const col = rng.int(0, 6);
+    const row = rng.int(0, 4);
+    const x = roadCenterX(col) + rng.range(-46, 46);
+    const y = roadCenterY(row) + rng.range(-46, 46);
+    peds.push(makePedestrian(x, y, rng));
   }
-  ped.retarget -= dt;
-  if (ped.retarget <= 0) {
-    ped.retarget = random.range(2, 6);
-    ped.angle += random.range(-1.2, 1.2);
-  }
-  ped.x += Math.cos(ped.angle) * ped.speed * dt;
-  ped.y += Math.sin(ped.angle) * ped.speed * dt;
+  return peds;
 }
 
-/** Scare every pedestrian near a point (a gunshot, a crash, a siren). */
-export function scareNearby(peds, x, y, radius) {
-  for (let i = 0; i < peds.length; i += 1) {
-    const ped = peds[i];
-    const dx = ped.x - x;
-    const dy = ped.y - y;
-    if (dx * dx + dy * dy < radius * radius) ped.scared = 4;
+export function stepPedestrian(ped, dt, rng, city, danger) {
+  if (ped.fleeTime > 0) {
+    ped.fleeTime -= dt;
+    ped.x += Math.cos(ped.angle) * PED_SPEED * 2.2 * dt;
+    ped.y += Math.sin(ped.angle) * PED_SPEED * 2.2 * dt;
+  } else if (ped.state === 'walk') {
+    ped.waitTime -= dt;
+    if (ped.waitTime <= 0) {
+      ped.angle = rng.range(0, Math.PI * 2);
+      ped.waitTime = rng.range(2, 6);
+    }
+    ped.x += Math.cos(ped.angle) * ped.speed * dt;
+    ped.y += Math.sin(ped.angle) * ped.speed * dt;
+    if (danger) {
+      ped.fleeTime = 2;
+      ped.angle = Math.atan2(ped.y - danger.y, ped.x - danger.x);
+    }
   }
+  const clamped = clampToWorld(ped.x, ped.y, 30);
+  ped.x = clamped.x;
+  ped.y = clamped.y;
+  const resolved = collideBuildings(city, ped.x, ped.y, 10);
+  ped.x = resolved.x;
+  ped.y = resolved.y;
+}
+
+// A pedestrian hit by a car is knocked down and stays down.
+export function knockDown(ped) {
+  ped.state = 'down';
+  ped.downTime = 999;
+}
+
+export function isDown(ped) {
+  return ped.state === 'down';
 }

@@ -1,174 +1,144 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s
-// steps (several in a slow frame, none in a fast one), and the renderer paints what is
-// there. The game moves between five screens: title, play, paused, wrecked and busted.
-// M starts the next story job. Clicking shoots the pistol on foot.
-//
-// ?seed=N fixes the city and the traffic. ?shot=start|chase|mission|over (with &seed=N)
-// stages that scene instead of running the loop, paints it twice and sets
-// window.__shotReady for a screenshot.
+// Browser shell for Solmar Streets.
+// Owns the canvas, the animation loop and the screens; the simulation in
+// world.js owns the game. A shot URL (?shot=start&seed=7) sets up a fixed
+// scene and signals window.__shotReady once it has rendered, so the
+// screenshot tool can capture a deterministic frame.
 
-import { STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_BUSTED, EVENT_CASH, EVENT_CRASH, EVENT_MISSION, EVENT_OVER, EVENT_SHOOT } from './world.js';
-import { ACTION_CONFIRM, ACTION_ENTER, ACTION_MISSION, ACTION_PAUSE, ACTION_PUNCH, createInput } from './input.js';
-import { createAudio } from './audio.js';
-import { createRenderer, SCREEN_BUSTED, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
-import { loadSave, storeSave } from './missions.js';
-
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped. */
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+import { VIEW_W, VIEW_H } from './config.js';
+import { makeWorld, stepWorld, startGame, restartGame } from './world.js';
+import { makeInput, bindInput, endFrame, screenToWorld } from './input.js';
+import { drawWorld, updateCamera } from './render.js';
+import { drawHud } from './hud.js';
+import { parseShot, applyShot } from './shots.js';
 
 const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const save = loadSave();
-const world = createWorld(createRandom(seed), save);
-const renderer = createRenderer(canvas);
-const audio = createAudio();
+const statusEl = document.getElementById('status');
+const ctx = canvas.getContext('2d');
 
-/** Convert a pointer position on the page to a point in the world. */
-function screenToWorld(clientX, clientY) {
-  const rect = canvas.getBoundingClientRect();
-  const deviceX = (clientX - rect.left) * (canvas.width / rect.width);
-  const deviceY = (clientY - rect.top) * (canvas.height / rect.height);
-  const viewScale = Math.min(canvas.width / 1280, canvas.height / 720);
-  const offsetX = (canvas.width - 1280 * viewScale) / 2;
-  const offsetY = (canvas.height - 720 * viewScale) / 2;
-  return {
-    x: (deviceX - offsetX) / viewScale + (world.state.camera.x - 640),
-    y: (deviceY - offsetY) / viewScale + (world.state.camera.y - 360),
-  };
+const { shot, seed } = parseShot(window.location.search);
+const world = makeWorld(seed);
+const input = makeInput();
+bindInput(input, canvas);
+
+if (shot) applyShot(world, shot);
+
+function resize() {
+  const scale = Math.min(window.innerWidth / VIEW_W, window.innerHeight / VIEW_H);
+  canvas.width = VIEW_W;
+  canvas.height = VIEW_H;
+  canvas.style.width = `${VIEW_W * scale}px`;
+  canvas.style.height = `${VIEW_H * scale}px`;
+}
+window.addEventListener('resize', resize);
+resize();
+
+let last = performance.now();
+let frames = 0;
+
+function drawScreen() {
+  ctx.save();
+  ctx.clearRect(0, 0, VIEW_W, VIEW_H);
+  drawWorld(ctx, world);
+  if (world.screen === 'title') {
+    ctx.fillStyle = 'rgba(8, 10, 24, 0.72)';
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff4fd8';
+    ctx.font = 'bold 84px system-ui, sans-serif';
+    ctx.fillText('SOLMAR', VIEW_W / 2, 210);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('STREETS', VIEW_W / 2, 300);
+    ctx.fillStyle = '#ffd60a';
+    ctx.font = '22px system-ui, sans-serif';
+    ctx.fillText('A sunny coastal open world. Steal cars, outrun the police,', VIEW_W / 2, 370);
+    ctx.fillText('and pull off three story jobs for $7,000.', VIEW_W / 2, 402);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 26px system-ui, sans-serif';
+    ctx.fillText(shot ? 'Press any key' : 'Press ENTER to play', VIEW_W / 2, 480);
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.fillStyle = '#bbbbbb';
+    ctx.fillText('WASD drive and walk · E enter a car · Mouse aim, click to shoot · F punch · P pause', VIEW_W / 2, 540);
+    ctx.textAlign = 'left';
+  } else if (world.screen === 'paused') {
+    ctx.fillStyle = 'rgba(8, 10, 24, 0.6)';
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 56px system-ui, sans-serif';
+    ctx.fillText('PAUSED', VIEW_W / 2, VIEW_H / 2);
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText('Press P to resume', VIEW_W / 2, VIEW_H / 2 + 50);
+    ctx.textAlign = 'left';
+  } else if (world.screen === 'busted') {
+    ctx.fillStyle = 'rgba(8, 10, 24, 0.72)';
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#4d8dff';
+    ctx.font = 'bold 72px system-ui, sans-serif';
+    ctx.fillText('BUSTED', VIEW_W / 2, VIEW_H / 2 - 20);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText('The Solmar PD caught up with you.', VIEW_W / 2, VIEW_H / 2 + 30);
+    ctx.fillText('Press ENTER to try again', VIEW_W / 2, VIEW_H / 2 + 70);
+    ctx.textAlign = 'left';
+  } else if (world.screen === 'wrecked') {
+    ctx.fillStyle = 'rgba(8, 10, 24, 0.72)';
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff5a5a';
+    ctx.font = 'bold 72px system-ui, sans-serif';
+    ctx.fillText('WRECKED', VIEW_W / 2, VIEW_H / 2 - 20);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '20px system-ui, sans-serif';
+    ctx.fillText('Your ride is scrap. Solmar keeps moving without you.', VIEW_W / 2, VIEW_H / 2 + 30);
+    ctx.fillText('Press ENTER to try again', VIEW_W / 2, VIEW_H / 2 + 70);
+    ctx.textAlign = 'left';
+  }
+  if (world.screen === 'playing' || world.screen === 'paused') {
+    drawHud(ctx, world);
+  }
+  ctx.restore();
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  frames += 1;
 
-function runGame() {
-  let screen = SCREEN_TITLE;
-  let shootAt = null;
-  const input = createInput(
-    canvas,
-    (clientX, clientY) => {
-      if (screen === SCREEN_PLAY) shootAt = screenToWorld(clientX, clientY);
-    },
-    () => audio.unlock(),
-  );
-  let accumulator = 0;
-  let last = performance.now();
+  // Aim follows the mouse through the camera.
+  const scale = canvas.width / VIEW_W;
+  input.aim = screenToWorld(input, world.camera, scale);
 
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame() {
-    world.reset();
-    screen = SCREEN_PLAY;
-    announce('Playing. Drive with W A S D. Press M for a job.');
-  }
-
-  function endGame(busted) {
-    const state = world.state;
-    if (state.runCash > state.save.best) {
-      state.save.best = state.runCash;
-      storeSave(state.save);
+  if (world.screen === 'title') {
+    if (input.anyKey || input.pressedRestart) startGame(world);
+    updateCamera(world.camera, world.player.x, world.player.y);
+  } else if (world.screen === 'playing') {
+    if (input.pressedPause) {
+      world.screen = 'paused';
+    } else {
+      stepWorld(world, dt, input);
     }
-    screen = busted ? SCREEN_BUSTED : SCREEN_OVER;
-    announce(busted ? 'Busted by the Solmar PD.' : 'Wrecked. Game over.');
+  } else if (world.screen === 'paused') {
+    if (input.pressedPause) world.screen = 'playing';
+  } else if (world.screen === 'busted' || world.screen === 'wrecked') {
+    if (input.pressedRestart) restartGame(world);
   }
 
-  function handleEvents(events) {
-    if (events & EVENT_SHOOT) audio.shoot();
-    if (events & EVENT_CRASH) audio.crash();
-    if (events & EVENT_CASH) audio.cash();
-    if (events & EVENT_MISSION) audio.missionDone();
-    if (events & EVENT_BUSTED) audio.busted();
-    if (events & EVENT_OVER) endGame(!!(events & EVENT_BUSTED));
+  if (statusEl) {
+    statusEl.textContent = world.screen === 'playing'
+      ? `Cash $${world.player.cash}, wanted ${world.police.wanted} stars`
+      : world.screen;
   }
 
-  /** One fixed step, given the one-shot actions this frame took. */
-  function step(actions) {
-    const held = input.held;
-    const stepInput = {
-      up: held.up,
-      down: held.down,
-      left: held.left,
-      right: held.right,
-      run: held.run,
-      enter: !!(actions & ACTION_ENTER),
-      enterHeld: held.enter,
-      punch: !!(actions & ACTION_PUNCH),
-      shootAt,
-    };
-    shootAt = null;
-    const events = world.step(STEP, stepInput);
-    const player = world.state.player;
-    audio.update(STEP, player.inCar ? Math.abs(player.inCar.speed) : 0, 680, world.state.heat);
-    handleEvents(events);
+  drawScreen();
+  endFrame(input);
+
+  // A shot scene is ready once it has rendered a few frames.
+  if (shot && frames >= 5 && !world.shotReady) {
+    world.shotReady = true;
+    window.__shotReady = true;
   }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    const actions = input.takeActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_OVER || screen === SCREEN_BUSTED) {
-      if (actions & ACTION_CONFIRM) startGame();
-      accumulator = 0;
-    } else if (screen === SCREEN_PAUSED) {
-      if (actions & (ACTION_PAUSE | ACTION_CONFIRM)) {
-        screen = SCREEN_PLAY;
-        announce('Playing.');
-      }
-      accumulator = 0;
-    } else if (screen === SCREEN_PLAY) {
-      if (actions & ACTION_MISSION) {
-        const mission = world.startMission();
-        if (mission) announce(`${mission.mission.title}: ${mission.mission.intro}`);
-        else announce('All jobs done — free roam, or take a taxi fare.');
-      }
-      if (actions & ACTION_PAUSE) {
-        screen = SCREEN_PAUSED;
-        announce('Paused.');
-        accumulator = 0;
-      } else {
-        // One-shot presses count once per frame, not once per fixed substep: pass the
-        // actions to the first substep only, so one E press cannot enter and leave a car
-        // in the same frame.
-        let first = true;
-        while (accumulator >= STEP && screen === SCREEN_PLAY) {
-          step(first ? actions : 0);
-          first = false;
-          accumulator -= STEP;
-        }
-      }
-    }
-    renderer.draw(world.state, screen);
-  }
-
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('Solmar Streets. Press Space or click to start.');
   requestAnimationFrame(frame);
 }
 
-if (shot) runShot(shot);
-else runGame();
+requestAnimationFrame(frame);

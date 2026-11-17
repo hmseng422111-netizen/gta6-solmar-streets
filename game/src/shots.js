@@ -1,119 +1,114 @@
-// The screenshot scenes behind ?shot=start|chase|mission|over. Each one plays the real
-// rules forward from a fresh world for a fixed number of steps, steered by a simple
-// autopilot, so the frame is what a short game really looks like and the same seed always
-// gives the same frame. The autopilot drives toward the current objective, steals the
-// nearest car when on foot, and brakes for nothing — a hurried player, on purpose.
+// Fixed screenshot scenes for Solmar Streets.
+// The game reads ?shot=<name>&seed=<n> from the URL and sets the world up
+// deterministically, so the same scene renders the same way every time.
+// Each scene finishes by setting window.__shotReady, which the capture
+// script waits for before taking the screenshot.
 
-import { STEP } from './config.js';
-import { LANDMARKS } from './city.js';
-import { nearestEnterableCar } from './player.js';
-import { SCREEN_BUSTED, SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+import { makeWorld, startGame } from './world.js';
+import { addHeat } from './police.js';
 
-const START_SECONDS = 4;
-const CHASE_SECONDS = 18;
-const MISSION_SECONDS = 30;
-const OVER_SECONDS = 40;
+export const SHOT_NAMES = ['start', 'chase', 'mission', 'over'];
 
-/** Steer the player (or his car) toward a point: returns held keys for one step. */
-function driveToward(state, targetX, targetY) {
-  const player = state.player;
-  const px = player.inCar ? player.inCar.x : player.x;
-  const py = player.inCar ? player.inCar.y : player.y;
-  const input = { up: false, down: false, left: false, right: false, run: false, enter: false, enterHeld: false, punch: false, shootAt: null };
-  if (player.inCar) {
-    // In a car, steering is relative to the heading: turn toward the target bearing.
-    const angle = Math.atan2(targetY - py, targetX - px);
-    let diff = angle - player.inCar.angle;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    input.up = true;
-    if (diff > 0.25) input.right = true;
-    else if (diff < -0.25) input.left = true;
-    return input;
+export function applyShot(world, name) {
+  if (name === 'start') {
+    // Title screen: the camera looks over the city centre, the player on
+    // foot outside the safehouse.
+    world.screen = 'title';
+    const safehouse = world.city.landmarks.safehouse;
+    world.player.x = safehouse.doorX;
+    world.player.y = safehouse.doorY + 40;
+    world.camera.x = Math.max(0, world.player.x - 640);
+    world.camera.y = Math.max(0, world.player.y - 360);
+    return true;
   }
-  // On foot, movement is axis-aligned: walk straight toward the target.
-  if (targetY < py - 20) input.up = true;
-  else if (targetY > py + 20) input.down = true;
-  if (targetX < px - 20) input.left = true;
-  else if (targetX > px + 20) input.right = true;
-  return input;
-}
-
-function idleInput() {
-  return { up: false, down: false, left: false, right: false, run: false, enter: false, enterHeld: false, punch: false, shootAt: null };
-}
-
-/**
- * Set `world` to the named scene (start, chase, mission or over; any other name is start)
- * and return the screen to draw over it.
- */
-export function stageShot(name, world) {
-  const state = world.state;
-  world.reset();
-  if (name !== 'chase' && name !== 'mission' && name !== 'over') {
-    // Title over the city: let the traffic roll for a few seconds behind the panel.
-    for (let i = 0; i < START_SECONDS / STEP; i += 1) world.step(STEP, idleInput());
-    return { screen: SCREEN_TITLE };
-  }
-
   if (name === 'chase') {
-    // Steal the nearest car, then run from the cops through downtown with a 3-star wanted.
-    for (let i = 0; i < CHASE_SECONDS / STEP; i += 1) {
-      const player = state.player;
-      const input = driveToward(state, LANDMARKS.casino.x, LANDMARKS.casino.y);
-      if (!player.inCar) {
-        const car = nearestEnterableCar(player, state.cars);
-        if (car) input.enter = true;
-      }
-      if (i === 120) state.heat = 2.4;
-      world.step(STEP, input);
-      if (state.over) break;
+    // A three-star chase: the player in a car, speeding east down a road
+    // with three police cars closing in behind. The car starts on the
+    // road itself, so it cannot hit a building before the capture.
+    startGame(world);
+    const roadY = 800;
+    const car = world.cars.find((c) => c.parked) || world.cars[0];
+    car.x = 700;
+    car.y = roadY;
+    car.angle = 0;
+    car.occupied = true;
+    car.parked = false;
+    car.speed = 320;
+    world.player.onFoot = false;
+    world.player.car = car;
+    world.player.x = car.x;
+    world.player.y = car.y;
+    world.player.angle = 0;
+    addHeat(world.police, 250);
+    // Place three police cars behind the player on the same road.
+    for (let i = 0; i < 3; i += 1) {
+      const pc = {
+        x: car.x - 170 - i * 120,
+        y: roadY,
+        angle: 0,
+        speed: 380,
+        color: '#1b2a4a',
+        type: 'police',
+        occupied: true,
+        parked: false,
+        wrecked: false,
+        smoke: 0,
+      };
+      world.police.cars.push(pc);
     }
-    return { screen: state.over ? SCREEN_OVER : SCREEN_PLAY };
+    return true;
   }
-
   if (name === 'mission') {
-    // Start the first job and drive to the docks, package in hand, police in the mirror.
-    world.startMission();
-    for (let i = 0; i < MISSION_SECONDS / STEP; i += 1) {
-      const player = state.player;
-      const input = driveToward(state, LANDMARKS.docks.x, LANDMARKS.docks.y);
-      if (!player.inCar) {
-        const car = nearestEnterableCar(player, state.cars);
-        if (car) input.enter = true;
-      }
-      if (i === 200) state.heat = 1.6;
-      world.step(STEP, input);
-      if (state.over) break;
-    }
-    return { screen: state.over ? SCREEN_OVER : SCREEN_PLAY };
+    // Mission 1 in progress: the player drives east along the road south
+    // of Club Neon Palms, toward the Solmar Docks pickup, the objective
+    // marker glowing on the map.
+    startGame(world);
+    const club = world.city.landmarks.club;
+    const car = world.cars.find((c) => c.parked) || world.cars[0];
+    car.x = club.doorX;
+    car.y = 800;
+    car.angle = 0;
+    car.occupied = true;
+    car.parked = false;
+    car.speed = 180;
+    world.player.onFoot = false;
+    world.player.car = car;
+    world.player.x = car.x;
+    world.player.y = car.y;
+    world.player.angle = 0;
+    world.missions.index = 0;
+    world.missions.stage = 0;
+    return true;
   }
+  if (name === 'over') {
+    // The wrecked screen: the player's car is destroyed, smoke rising.
+    startGame(world);
+    const car = world.cars.find((c) => c.parked) || world.cars[0];
+    world.player.onFoot = false;
+    world.player.car = car;
+    car.occupied = true;
+    car.parked = false;
+    car.wrecked = true;
+    car.smoke = 1;
+    car.speed = 0;
+    world.player.x = car.x;
+    world.player.y = car.y;
+    world.screen = 'wrecked';
+    return true;
+  }
+  return false;
+}
 
-  // Over: steal a car, race downtown, then step out and stand still while the cops close
-  // in — a 4-star wanted level ends with Rio busted, which is the game-over screen.
-  for (let i = 0; i < OVER_SECONDS / STEP; i += 1) {
-    const player = state.player;
-    let input;
-    if (i < 15 / STEP) {
-      input = driveToward(state, LANDMARKS.casino.x, LANDMARKS.casino.y);
-      if (!player.inCar) {
-        const car = nearestEnterableCar(player, state.cars);
-        if (car) input.enter = true;
-      }
-    } else if (i === Math.floor(15 / STEP)) {
-      input = idleInput();
-      input.enter = true;
-    } else {
-      input = idleInput();
-    }
-    if (i === 60) state.heat = 4.2;
-    world.step(STEP, input);
-    if (state.over) break;
-  }
-  // If the cops never quite caught him, the scene still shows the busted screen: force it.
-  if (!state.over) {
-    state.busted = true;
-    state.over = true;
-  }
-  return { screen: state.busted ? SCREEN_BUSTED : SCREEN_OVER };
+export function parseShot(query) {
+  const params = new URLSearchParams(query);
+  const shot = params.get('shot');
+  const seed = Number(params.get('seed') || '7');
+  return { shot: SHOT_NAMES.includes(shot) ? shot : null, seed: Number.isFinite(seed) ? seed : 7 };
+}
+
+// Build a world for a shot and apply it. Used by main.js and by tests.
+export function makeShotWorld(name, seed) {
+  const world = makeWorld(seed);
+  applyShot(world, name);
+  return world;
 }

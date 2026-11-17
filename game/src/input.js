@@ -1,92 +1,112 @@
-// Keyboard and pointer input. Held keys give movement and driving; one-shot presses
-// (enter a car, shoot, punch, pause, confirm) are queued as bit flags and taken once by
-// the loop, so a press between two frames is never lost and never counted twice.
+// Keyboard and mouse input for Solmar Streets.
+// The game reads a plain state object: held directions, edge-triggered
+// actions (pressed once per keypress), and the mouse position in canvas
+// pixels. A helper converts a screen point to a world point through the
+// camera, so shooting aims where the player points.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
-export const ACTION_ENTER = 4;
-export const ACTION_PUNCH = 8;
-export const ACTION_MISSION = 16;
-
-const UP = new Set(['ArrowUp', 'KeyW']);
-const DOWN = new Set(['ArrowDown', 'KeyS']);
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
-const ENTER = new Set(['KeyE']);
-const PUNCH = new Set(['KeyF']);
-const MISSION = new Set(['KeyM']);
-
-export function createInput(target, onShoot, onUnlock) {
-  const held = { up: false, down: false, left: false, right: false, run: false, enter: false, shoot: false };
-  let actions = 0;
-  let mouseX = 0;
-  let mouseY = 0;
-
-  function keyDown(event) {
-    if (UP.has(event.code)) held.up = true;
-    else if (DOWN.has(event.code)) held.down = true;
-    else if (LEFT.has(event.code)) held.left = true;
-    else if (RIGHT.has(event.code)) held.right = true;
-    else if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') held.run = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else if (ENTER.has(event.code)) {
-      held.enter = true;
-      if (!event.repeat) actions |= ACTION_ENTER;
-    } else if (PUNCH.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PUNCH;
-    } else if (MISSION.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_MISSION;
-    } else return;
-    if (onUnlock) onUnlock();
-    event.preventDefault();
-  }
-
-  function keyUp(event) {
-    if (UP.has(event.code)) held.up = false;
-    else if (DOWN.has(event.code)) held.down = false;
-    else if (LEFT.has(event.code)) held.left = false;
-    else if (RIGHT.has(event.code)) held.right = false;
-    else if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') held.run = false;
-    else if (ENTER.has(event.code)) held.enter = false;
-  }
-
-  window.addEventListener('keydown', keyDown);
-  window.addEventListener('keyup', keyUp);
-  window.addEventListener('blur', () => {
-    held.up = false;
-    held.down = false;
-    held.left = false;
-    held.right = false;
-    held.run = false;
-    held.enter = false;
-    held.shoot = false;
-  });
-  target.addEventListener('pointerdown', (event) => {
-    mouseX = event.clientX;
-    mouseY = event.clientY;
-    if (onShoot) onShoot(mouseX, mouseY);
-    if (onUnlock) onUnlock();
-  });
-  target.addEventListener('pointermove', (event) => {
-    mouseX = event.clientX;
-    mouseY = event.clientY;
-  });
-
+export function makeInput() {
   return {
-    held,
-    mouse() {
-      return { x: mouseX, y: mouseY };
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
+    up: false,
+    down: false,
+    left: false,
+    right: false,
+    run: false,
+    enter: false,
+    punch: false,
+    shoot: false,
+    mouseX: 0,
+    mouseY: 0,
+    mouseDown: false,
+    // Edge-triggered actions, consumed once per frame by the game loop.
+    pressedEnter: false,
+    pressedPunch: false,
+    pressedShoot: false,
+    pressedPause: false,
+    pressedRestart: false,
+    anyKey: false,
   };
+}
+
+const KEYMAP = {
+  KeyW: 'up',
+  ArrowUp: 'up',
+  KeyS: 'down',
+  ArrowDown: 'down',
+  KeyA: 'left',
+  ArrowLeft: 'left',
+  KeyD: 'right',
+  ArrowRight: 'right',
+  ShiftLeft: 'run',
+  ShiftRight: 'run',
+  KeyE: 'enter',
+  KeyF: 'punch',
+  Space: 'shoot',
+};
+
+export function bindInput(input, canvas) {
+  if (typeof window === 'undefined') return () => {};
+  const onKeyDown = (event) => {
+    const field = KEYMAP[event.code];
+    if (field) {
+      if (!input[field]) {
+        if (field === 'enter') input.pressedEnter = true;
+        if (field === 'punch') input.pressedPunch = true;
+        if (field === 'shoot') input.pressedShoot = true;
+      }
+      input[field] = true;
+      input.anyKey = true;
+      event.preventDefault();
+    }
+    if (event.code === 'KeyP' || event.code === 'Escape') input.pressedPause = true;
+    if (event.code === 'Enter') input.pressedRestart = true;
+  };
+  const onKeyUp = (event) => {
+    const field = KEYMAP[event.code];
+    if (field) input[field] = false;
+  };
+  const onMouseMove = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    input.mouseX = event.clientX - rect.left;
+    input.mouseY = event.clientY - rect.top;
+  };
+  const onMouseDown = (event) => {
+    if (event.button === 0) {
+      input.mouseDown = true;
+      input.pressedShoot = true;
+      input.anyKey = true;
+    }
+  };
+  const onMouseUp = () => {
+    input.mouseDown = false;
+  };
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  canvas.addEventListener('mousemove', onMouseMove);
+  canvas.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mouseup', onMouseUp);
+  return () => {
+    window.removeEventListener('keydown', onKeyDown);
+    window.removeEventListener('keyup', onKeyUp);
+    canvas.removeEventListener('mousemove', onMouseMove);
+    canvas.removeEventListener('mousedown', onMouseDown);
+    window.removeEventListener('mouseup', onMouseUp);
+  };
+}
+
+// Convert a canvas point to a world point through the camera.
+export function screenToWorld(input, camera, scale) {
+  return {
+    x: camera.x + input.mouseX / scale,
+    y: camera.y + input.mouseY / scale,
+  };
+}
+
+// Clear edge-triggered flags after each frame.
+export function endFrame(input) {
+  input.pressedEnter = false;
+  input.pressedPunch = false;
+  input.pressedShoot = false;
+  input.pressedPause = false;
+  input.pressedRestart = false;
+  input.anyKey = false;
 }

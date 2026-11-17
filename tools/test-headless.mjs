@@ -1,194 +1,243 @@
-// Headless test for Solmar Streets: stubs the browser (window, document, canvas,
-// localStorage) and then runs the real game logic — world steps, mission flow, police,
-// fares, the staged screenshot scenes and every draw call — catching any exception.
-// Run from the entry's root:  node tools/test-headless.mjs
-// This file is a development test only; it is not part of the submitted entry.
+// Headless tests for Solmar Streets (Node 22, no browser needed).
+// The simulation is DOM-free, so the world can be built and stepped in
+// plain Node. Rendering is exercised with a fake 2D context that absorbs
+// every call and records that the right methods were reached.
+// Run: node tools/test-headless.mjs
 
-const store = new Map();
-globalThis.window = {
-  innerWidth: 1280,
-  innerHeight: 720,
-  devicePixelRatio: 1,
-  location: { search: '' },
-  localStorage: {
-    getItem: (k) => (store.has(k) ? store.get(k) : null),
-    setItem: (k, v) => store.set(k, String(v)),
-  },
-  addEventListener: () => {},
-  requestAnimationFrame: () => 0,
-  performance: { now: () => 0 },
-  AudioContext: undefined,
-  webkitAudioContext: undefined,
-};
-globalThis.document = {
-  getElementById: () => fakeCanvas(),
-  addEventListener: () => {},
-};
-globalThis.performance = { now: () => Date.now() };
-globalThis.requestAnimationFrame = () => 0;
+import { makeWorld, stepWorld, startGame } from '../game/src/world.js';
+import { makeShotWorld, SHOT_NAMES } from '../game/src/shots.js';
+import { drawWorld } from '../game/src/render.js';
+import { drawHud } from '../game/src/hud.js';
+import { addHeat, clearWanted } from '../game/src/police.js';
+import { enterCar, nearestCarToEnter } from '../game/src/player.js';
 
-function fakeContext() {
-  return new Proxy(
-    {},
-    {
-      get(_target, prop) {
-        if (prop === 'canvas') return {};
-        if (prop === 'measureText') return () => ({ width: 0 });
-        return (..._args) => {};
-      },
-      set() {
-        return true;
-      },
-    },
-  );
+let passed = 0;
+let failed = 0;
+
+function check(name, condition, detail = '') {
+  if (condition) {
+    passed += 1;
+    console.log(`  PASS ${name}`);
+  } else {
+    failed += 1;
+    console.log(`  FAIL ${name} ${detail}`);
+  }
 }
-function fakeCanvas() {
+
+function makeInput(overrides = {}) {
   return {
-    width: 1280,
-    height: 720,
-    getContext: () => fakeContext(),
-    addEventListener: () => {},
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 1280, height: 720 }),
+    up: false, down: false, left: false, right: false, run: false,
+    enter: false, punch: false, shoot: false,
+    pressedEnter: false, pressedPunch: false, pressedShoot: false,
+    pressedPause: false, pressedRestart: false, anyKey: false,
+    aim: { x: 0, y: 0 },
+    ...overrides,
   };
 }
 
-const failures = [];
-function check(name, fn) {
-  try {
-    fn();
-    console.log(`ok   ${name}`);
-  } catch (error) {
-    failures.push(name);
-    console.log(`FAIL ${name}: ${error.message}`);
+// A fake 2D context: every method call succeeds, every property set lands.
+function fakeCtx() {
+  const calls = [];
+  const target = { calls, measureText: () => ({ width: 120 }) };
+  return new Proxy(target, {
+    get(obj, prop) {
+      if (prop in obj) return obj[prop];
+      if (prop === 'canvas') return { width: 1280, height: 720 };
+      return (...args) => {
+        calls.push(String(prop));
+        return undefined;
+      };
+    },
+    set(obj, prop, value) {
+      obj[prop] = value;
+      return true;
+    },
+  });
+}
+
+function step(world, seconds, input, dt = 1 / 60) {
+  const frames = Math.round(seconds / dt);
+  for (let i = 0; i < frames; i += 1) {
+    stepWorld(world, dt, input);
+    input.pressedEnter = false;
+    input.pressedPunch = false;
+    input.pressedShoot = false;
   }
 }
 
-const { createRandom } = await import('../game/src/random.js');
-const { createCity, onRoad, insideBuilding } = await import('../game/src/city.js');
-const { createWorld, EVENT_OVER } = await import('../game/src/world.js');
-const { createRenderer, SCREEN_TITLE, SCREEN_PLAY, SCREEN_OVER, SCREEN_BUSTED, SCREEN_PAUSED } = await import('../game/src/render.js');
-const { stageShot } = await import('../game/src/shots.js');
-const { loadSave } = await import('../game/src/missions.js');
+console.log('Solmar Streets headless tests\n');
 
-const random = createRandom(7);
-const save = loadSave();
-const world = createWorld(random, save);
-const renderer = createRenderer(fakeCanvas());
+// 1. City generation.
+{
+  const world = makeWorld(7);
+  check('city has buildings', world.city.buildings.length > 20, `got ${world.city.buildings.length}`);
+  check('city has all 4 landmarks',
+    ['club', 'casino', 'docks', 'safehouse'].every((k) => !!world.city.landmarks[k]));
+  check('docks sit on the beach', world.city.landmarks.docks.x > 2320);
+  check('player starts at the safehouse',
+    Math.abs(world.player.x - world.city.landmarks.safehouse.doorX) < 5);
+  check('starting cash is $250', world.player.cash === 250);
+  check('traffic and parked cars exist', world.cars.length >= 20, `got ${world.cars.length}`);
+  check('pedestrians exist', world.peds.length >= 20, `got ${world.peds.length}`);
+}
 
-check('city builds: buildings and parks', () => {
-  const city = createCity(createRandom(7));
-  if (city.buildings.length < 50) throw new Error(`only ${city.buildings.length} buildings`);
-  if (city.parks.length < 5) throw new Error(`only ${city.parks.length} parks`);
-  if (onRoad(400, 400) !== true) throw new Error('road point not on a road');
-  if (onRoad(200, 200) !== false) throw new Error('block point counted as a road');
-  if (!insideBuilding(city, city.buildings[0].x + 5, city.buildings[0].y + 5)) throw new Error('building test failed');
-});
-
-check('world steps 30s of free roam without errors', () => {
-  const idle = { up: false, down: false, left: false, right: false, run: false, enter: false, enterHeld: false, punch: false, shootAt: null };
-  for (let i = 0; i < 1800; i += 1) world.step(1 / 60, idle);
-  const s = world.state;
-  if (s.cars.length < 10) throw new Error('traffic missing');
-  if (s.peds.length < 10) throw new Error('pedestrians missing');
-  console.log(`     after 30s: traffic=${s.cars.length} peds=${s.peds.length} heat=${s.heat.toFixed(2)} cash=$${s.save.cash}`);
-});
-
-check('driving: enter a car and drive 10s straight down a road', () => {
-  const s = world.state;
-  // Put the player in a parked car on a road, facing east, and drive straight.
-  const car = s.cars.find((c) => c.parked && !c.sports);
-  car.x = 400;
-  car.y = 1200;
-  car.angle = 0;
-  s.player.x = car.x + 20;
-  s.player.y = car.y;
-  s.player.inCar = car;
-  car.parked = false;
-  const before = { x: car.x, y: car.y };
-  for (let i = 0; i < 600; i += 1) {
-    world.step(1 / 60, { up: true, down: false, left: false, right: false, enter: false, enterHeld: false, punch: false, shootAt: null });
+// 2. Thirty seconds of free roaming with no errors.
+{
+  const world = makeWorld(7);
+  startGame(world);
+  const input = makeInput();
+  const startX = world.player.x;
+  const startY = world.player.y;
+  const dirs = ['up', 'right', 'down', 'left'];
+  for (let s = 0; s < 30; s += 1) {
+    input.up = dirs[s % 4] === 'up';
+    input.right = dirs[s % 4] === 'right';
+    input.down = dirs[s % 4] === 'down';
+    input.left = dirs[s % 4] === 'left';
+    step(world, 1, input);
   }
-  const moved = Math.hypot(car.x - before.x, car.y - before.y);
-  if (moved < 2500) throw new Error(`car barely moved: ${moved.toFixed(0)}px`);
-  console.log(`     car moved ${moved.toFixed(0)}px, speed ${car.speed.toFixed(0)}`);
-});
+  check('30s free roam completes', world.time >= 29.9, `time=${world.time.toFixed(2)}`);
+  check('player moved while roaming',
+    Math.abs(world.player.x - startX) + Math.abs(world.player.y - startY) > 50);
+  check('still playing after free roam', world.screen === 'playing');
+}
 
-check('wanted: heat spawns police, police chase', () => {
-  const s = world.state;
-  s.heat = 3.4;
-  for (let i = 0; i < 600; i += 1) {
-    world.step(1 / 60, { up: true, down: false, left: false, right: false, enter: false, enterHeld: false, punch: false, shootAt: null });
-    if (s.over) break;
+// 3. Driving: enter a car and drive.
+{
+  const world = makeWorld(7);
+  startGame(world);
+  const car = world.cars.find((c) => c.parked);
+  world.player.x = car.x + 10;
+  world.player.y = car.y;
+  const input = makeInput({ pressedEnter: true });
+  stepWorld(world, 1 / 60, input);
+  check('entering a parked car works', !world.player.onFoot && world.player.car === car);
+  check('stealing raises wanted', world.police.wanted >= 1, `wanted=${world.police.wanted}`);
+  const beforeX = world.player.x;
+  const beforeY = world.player.y;
+  const drive = makeInput({ up: true });
+  step(world, 3, drive);
+  check('car accelerates', Math.abs(world.player.car.speed) > 50, `speed=${world.player.car.speed.toFixed(0)}`);
+  check('car moved',
+    Math.abs(world.player.x - beforeX) + Math.abs(world.player.y - beforeY) > 50);
+  const exit = makeInput({ pressedEnter: true });
+  stepWorld(world, 1 / 60, exit);
+  check('exiting the car works', world.player.onFoot && world.player.car === null);
+}
+
+// 4. Wanted level rises and falls.
+{
+  const world = makeWorld(7);
+  startGame(world);
+  addHeat(world.police, 250);
+  check('heat sets 2 stars', world.police.wanted === 2, `wanted=${world.police.wanted}`);
+  step(world, 6, makeInput());
+  check('police cars spawn', world.police.cars.length > 0, `cars=${world.police.cars.length}`);
+  // Escape: no police car nearby and no fresh crime, so the heat cools off.
+  world.police.cars = [];
+  world.police.lastCrimeAt = -100;
+  world.player.x = 200;
+  world.player.y = 200;
+  step(world, 21, makeInput());
+  check('wanted decays out of sight', world.police.wanted === 0, `wanted=${world.police.wanted}`);
+  clearWanted(world.police);
+  check('clearWanted resets', world.police.wanted === 0 && world.police.heat === 0);
+}
+
+// 5. Mission 1 pays $800.
+{
+  const world = makeWorld(7);
+  startGame(world);
+  const before = world.player.cash;
+  const docks = world.city.landmarks.docks;
+  world.player.x = docks.doorX;
+  world.player.y = docks.doorY;
+  step(world, 0.2, makeInput());
+  check('mission 1 stage 1 completes', world.missions.stage === 1, `stage=${world.missions.stage}`);
+  const club = world.city.landmarks.club;
+  world.player.x = club.doorX;
+  world.player.y = club.doorY;
+  step(world, 0.2, makeInput());
+  check('mission 1 pays $800', world.player.cash === before + 800, `cash=${world.player.cash}`);
+  check('mission 2 is next', world.missions.index === 1);
+}
+
+// 6. Mission 3 vault pays $5000.
+{
+  const world = makeWorld(7);
+  startGame(world);
+  world.missions.index = 2;
+  world.missions.stage = 0;
+  const before = world.player.cash;
+  const casino = world.city.landmarks.casino;
+  world.player.x = casino.doorX;
+  world.player.y = casino.doorY;
+  step(world, 5.5, makeInput());
+  check('vault cracks after 5s on foot', world.missions.stage === 1, `stage=${world.missions.stage}`);
+  const safe = world.city.landmarks.safehouse;
+  world.player.x = safe.doorX;
+  world.player.y = safe.doorY;
+  step(world, 0.2, makeInput());
+  check('mission 3 pays $5000', world.player.cash === before + 5000, `cash=${world.player.cash}`);
+  check('all missions complete', world.missions.index === 3);
+}
+
+// 7. Shooting.
+{
+  const world = makeWorld(7);
+  startGame(world);
+  const input = makeInput({
+    pressedShoot: true,
+    aim: { x: world.player.x + 100, y: world.player.y },
+  });
+  stepWorld(world, 1 / 60, input);
+  check('shooting creates a bullet', world.bullets.length === 1);
+  check('shooting is recorded', world.stats.shotsFired === 1);
+  step(world, 1, makeInput());
+  check('bullet travels and expires', world.bullets.length === 0);
+}
+
+// 8. All screens render without errors.
+{
+  for (const screen of ['title', 'playing', 'paused', 'busted', 'wrecked']) {
+    const world = makeWorld(7);
+    world.screen = screen;
+    const ctx = fakeCtx();
+    try {
+      drawWorld(ctx, world);
+      drawHud(ctx, world);
+      check(`screen "${screen}" renders`, ctx.calls.length > 50, `calls=${ctx.calls.length}`);
+    } catch (err) {
+      check(`screen "${screen}" renders`, false, String(err));
+    }
   }
-  if (s.police.length === 0) throw new Error('no police spawned at 3 stars');
-  console.log(`     police cars: ${s.police.length}, nearest ${Math.round(s.nearestPoliceDist)}px, over=${s.over}`);
-});
+}
 
-check('mission 1: drive to the docks and the club', () => {
-  const w2 = createWorld(createRandom(11), loadSave());
-  const mission = w2.startMission();
-  if (!mission || mission.mission.id !== 'pickup') throw new Error('first mission is not the pickup');
-  const s = w2.state;
-  // Teleport the player (in a car) onto each objective in turn.
-  const car = s.cars.find((c) => c.parked);
-  s.player.inCar = car;
-  car.parked = false;
-  for (const objective of mission.mission.objectives) {
-    car.x = objective.x;
-    car.y = objective.y;
-    s.player.x = objective.x;
-    s.player.y = objective.y;
-    w2.step(1 / 60, { up: false, down: false, left: false, right: false, enter: false, enterHeld: false, punch: false, shootAt: null });
+// 9. The 4 fixed scenes render.
+{
+  for (const name of SHOT_NAMES) {
+    const world = makeShotWorld(name, 7);
+    const ctx = fakeCtx();
+    try {
+      drawWorld(ctx, world);
+      drawHud(ctx, world);
+      const expected = { start: 'title', chase: 'playing', mission: 'playing', over: 'wrecked' }[name];
+      check(`shot "${name}" renders (screen=${world.screen})`,
+        ctx.calls.length > 50 && world.screen === expected);
+    } catch (err) {
+      check(`shot "${name}" renders`, false, String(err));
+    }
   }
-  if (s.mission !== null) throw new Error('mission did not complete');
-  if (s.save.cash < 800) throw new Error(`mission reward not paid, cash=$${s.save.cash}`);
-  console.log(`     mission paid, cash=$${s.save.cash}, missionsDone=${s.save.missionsDone}`);
-});
+}
 
-check('mission 3 vault: hold E to crack it', () => {
-  const w3 = createWorld(createRandom(13), loadSave());
-  w3.state.save.missionsDone = 2;
-  const mission = w3.startMission();
-  if (!mission || mission.mission.id !== 'bigscore') throw new Error('third mission is not the big score');
-  const s = w3.state;
-  const car = s.cars.find((c) => c.parked);
-  s.player.inCar = car;
-  car.parked = false;
-  // Reach the casino, then hold E for the vault.
-  car.x = 2000;
-  car.y = 1400;
-  s.player.x = 2000;
-  s.player.y = 1400;
-  w3.step(1 / 60, { up: false, down: false, left: false, right: false, enter: false, enterHeld: false, punch: false, shootAt: null });
-  for (let i = 0; i < 240; i += 1) {
-    w3.step(1 / 60, { up: false, down: false, left: false, right: false, enter: false, enterHeld: true, punch: false, shootAt: null });
-  }
-  if (s.vaultProgress >= 1) throw new Error('vault should have cracked and reset progress');
-  if (s.mission === null) throw new Error('mission should still be active (escape left)');
-  console.log(`     vault cracked, heat=${s.heat.toFixed(1)}, objective now: ${s.mission.mission.objectives[s.mission.objectiveIndex].id}`);
-});
+// 10. Determinism: same seed, same city.
+{
+  const a = makeWorld(7);
+  const b = makeWorld(7);
+  const same = JSON.stringify(a.city.buildings) === JSON.stringify(b.city.buildings)
+    && JSON.stringify(a.city.landmarks) === JSON.stringify(b.city.landmarks);
+  check('seed 7 builds the same city twice', same);
+}
 
-check('shooting: pistol fires, tracer recorded, ammo spent', () => {
-  const w4 = createWorld(createRandom(17), loadSave());
-  const s = w4.state;
-  const ammoBefore = s.player.ammo;
-  w4.step(1 / 60, { up: false, down: false, left: false, right: false, enter: false, enterHeld: false, punch: false, shootAt: { x: s.player.x + 200, y: s.player.y } });
-  if (s.player.ammo !== ammoBefore - 1) throw new Error('ammo did not decrease');
-  if (s.tracers.length === 0) throw new Error('no tracer recorded');
-});
-
-check('draw: every screen paints without errors', () => {
-  const s = world.state;
-  for (const screen of [SCREEN_TITLE, SCREEN_PLAY, SCREEN_PAUSED, SCREEN_OVER, SCREEN_BUSTED]) renderer.draw(s, screen);
-});
-
-check('shots: all four scenes stage and paint', () => {
-  for (const name of ['start', 'chase', 'mission', 'over']) {
-    const scene = stageShot(name, world);
-    renderer.draw(world.state, scene.screen);
-    console.log(`     shot ${name}: screen=${scene.screen} heat=${world.state.heat.toFixed(1)} over=${world.state.over}`);
-  }
-});
-
-console.log(failures.length === 0 ? 'ALL TESTS PASSED' : `${failures.length} FAILURES: ${failures.join(', ')}`);
-process.exit(failures.length === 0 ? 0 : 1);
+console.log(`\n${passed} passed, ${failed} failed`);
+process.exit(failed === 0 ? 0 : 1);

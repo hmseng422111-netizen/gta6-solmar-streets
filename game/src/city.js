@@ -1,158 +1,169 @@
-// The city of Solmar: a road grid, the buildings that fill its blocks, the beach along
-// the south edge, the marina in the east, and the landmarks the missions use. Everything is
-// derived from the seed, so the same seed always builds the same city.
-//
-// Roads run every WORLD.roadGap pixels, centred on multiples of the gap; a point is on a
-// road when it is within half a road width of a road centre line. Buildings sit inside the
-// blocks between roads, inset from the road edge. The collision test only looks at the
-// buildings of the block a point is in, so it stays cheap whatever the city holds.
+// The city of Solmar: roads, blocks, buildings and landmarks.
+// The layout is a grid of roads with buildings filling the blocks between
+// them, a beach and sea along the eastern edge, and four landmarks placed
+// on fixed blocks so missions always know where to send the player.
 
-import { BUILDING_COLORS, WORLD } from './config.js';
+import {
+  WORLD_W, WORLD_H, ROAD_STEP, ROAD_OFFSET, ROAD_W,
+  BEACH_X, SEA_X, BUILDING_COLORS,
+} from './config.js';
 
-/** Landmark names, all invented for this game. Each point sits on a road, at the street
- * entrance of the place it names, so a car can reach it. */
-export const LANDMARKS = {
-  safehouse: { name: 'Rio\u2019s Safehouse', x: 400, y: 620 },
-  docks: { name: 'Solmar Docks', x: 3200, y: 2400 },
-  club: { name: 'Club Neon Palms', x: 1200, y: 1000 },
-  marina: { name: 'Marina Lot', x: 3200, y: 620 },
-  casino: { name: 'Casino Del Sol', x: 2000, y: 1400 },
-  hospital: { name: 'Solmar General', x: 1200, y: 2000 },
-  beach: { name: 'Palmera Beach', x: 1800, y: 2480 },
+// Landmark blocks are fixed by grid position so the map reads the same
+// every seed; their exact doorstep varies a little with the seed.
+const LANDMARK_BLOCKS = {
+  club: { col: 1, row: 1 },
+  casino: { col: 5, row: 2 },
+  docks: { col: 6, row: 4 },
+  safehouse: { col: 1, row: 4 },
 };
 
-const HALF_ROAD = WORLD.roadWidth / 2;
-
-/** True when the point is on a road (within half a road width of a road centre line). */
-export function onRoad(x, y) {
-  const rx = ((x % WORLD.roadGap) + WORLD.roadGap) % WORLD.roadGap;
-  const ry = ((y % WORLD.roadGap) + WORLD.roadGap) % WORLD.roadGap;
-  const nearVertical = Math.min(rx, WORLD.roadGap - rx) <= HALF_ROAD;
-  const nearHorizontal = Math.min(ry, WORLD.roadGap - ry) <= HALF_ROAD;
-  return nearVertical || nearHorizontal;
+export function roadCenterX(col) {
+  return ROAD_OFFSET + col * ROAD_STEP;
 }
 
-/** The nearest point on a road centre line, for snapping spawns onto the street. */
-export function snapToRoad(x, y) {
-  const gx = Math.round(x / WORLD.roadGap) * WORLD.roadGap;
-  const gy = Math.round(y / WORLD.roadGap) * WORLD.roadGap;
-  const dx = Math.abs(x - gx);
-  const dy = Math.abs(y - gy);
-  return dx < dy ? { x: gx, y } : { x, y: gy };
+export function roadCenterY(row) {
+  return ROAD_OFFSET + row * ROAD_STEP;
 }
 
-/** True when the point is inside any building (buildings are axis-aligned boxes). */
-export function insideBuilding(city, x, y) {
-  const list = city.byBlock.get(blockKey(x, y));
-  if (!list) return false;
-  for (let i = 0; i < list.length; i += 1) {
-    const b = list[i];
-    if (x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) return true;
+export function isOnRoad(x, y) {
+  const half = ROAD_W / 2 + 6;
+  for (let c = 0; c <= 7; c += 1) {
+    if (Math.abs(x - roadCenterX(c)) < half) return true;
+  }
+  for (let r = 0; r <= 5; r += 1) {
+    if (Math.abs(y - roadCenterY(r)) < half) return true;
   }
   return false;
 }
 
-/** Push a circle out of any building it overlaps; returns true when it moved. */
-export function resolveBuildingCollision(city, body) {
-  const list = city.byBlock.get(blockKey(body.x, body.y));
-  if (!list) return false;
-  let moved = false;
-  for (let i = 0; i < list.length; i += 1) {
-    const b = list[i];
-    const nearestX = Math.max(b.x, Math.min(body.x, b.x + b.w));
-    const nearestY = Math.max(b.y, Math.min(body.y, b.y + b.h));
-    const dx = body.x - nearestX;
-    const dy = body.y - nearestY;
-    const distSq = dx * dx + dy * dy;
-    const r = body.radius || 14;
-    if (distSq >= r * r) continue;
-    moved = true;
-    if (distSq === 0) {
-      body.y = b.y - r;
-      continue;
-    }
-    const dist = Math.sqrt(distSq);
-    body.x = nearestX + (dx / dist) * r;
-    body.y = nearestY + (dy / dist) * r;
+// Snap a point to the centre of the nearest road.
+export function nearestRoadPoint(x, y) {
+  let bestX = roadCenterX(0);
+  let bestD = Infinity;
+  for (let c = 0; c <= 7; c += 1) {
+    const d = Math.abs(x - roadCenterX(c));
+    if (d < bestD) { bestD = d; bestX = roadCenterX(c); }
   }
-  return moved;
+  let bestY = roadCenterY(0);
+  bestD = Infinity;
+  for (let r = 0; r <= 5; r += 1) {
+    const d = Math.abs(y - roadCenterY(r));
+    if (d < bestD) { bestD = d; bestY = roadCenterY(r); }
+  }
+  // Keep the axis the point was already closest to.
+  if (Math.abs(x - bestX) < Math.abs(y - bestY)) return { x: bestX, y };
+  return { x, y: bestY };
 }
 
-function blockKey(x, y) {
-  return `${Math.floor(x / WORLD.roadGap)}:${Math.floor(y / WORLD.roadGap)}`;
-}
-
-/** Build the city: roads, buildings, parks, the beach, the marina and the landmarks. */
-export function createCity(random) {
+export function generateCity(rng) {
   const buildings = [];
-  const byBlock = new Map();
-  const parks = [];
-  const gap = WORLD.roadGap;
-  const inset = HALF_ROAD + 26;
+  const landmarks = {};
+  const parkingSpots = [];
 
-  for (let bx = 0; bx < WORLD.width / gap; bx += 1) {
-    for (let by = 0; by < WORLD.height / gap; by += 1) {
-      const x0 = bx * gap + inset;
-      const y0 = by * gap + inset;
-      const w = gap - inset * 2;
-      const h = gap - inset * 2;
-      // The beach strip and the marina hold no buildings.
-      if (y0 > WORLD.beachY - 60 || x0 > WORLD.marinaX - 60) continue;
-      // One block in five is a park instead of buildings.
-      if (random.chance(0.2)) {
-        parks.push({ x: x0, y: y0, w, h, trees: random.int(3, 6) });
+  const cols = 7;
+  const rows = 5;
+  for (let col = 0; col < cols; col += 1) {
+    for (let row = 0; row < rows; row += 1) {
+      const x0 = roadCenterX(col) + ROAD_W / 2 + 14;
+      const y0 = roadCenterY(row) + ROAD_W / 2 + 14;
+      const x1 = roadCenterX(col + 1) - ROAD_W / 2 - 14;
+      const y1 = roadCenterY(row + 1) - ROAD_W / 2 - 14;
+      if (x1 <= x0 || y1 <= y0) continue;
+      if (x0 > BEACH_X) continue;
+
+      const landmarkKey = Object.keys(LANDMARK_BLOCKS).find(
+        (key) => LANDMARK_BLOCKS[key].col === col && LANDMARK_BLOCKS[key].row === row,
+      );
+      // The docks are placed on the beach after the loop, not in a block.
+      if (landmarkKey === 'docks') continue;
+      if (landmarkKey) {
+        const w = Math.min(150, x1 - x0);
+        const h = Math.min(110, y1 - y0);
+        const bx = x0 + (x1 - x0 - w) / 2;
+        const by = y0 + (y1 - y0 - h) / 2;
+        landmarks[landmarkKey] = {
+          x: bx + w / 2,
+          y: by + h / 2,
+          w,
+          h,
+          doorX: bx + w / 2,
+          doorY: by + h + 16,
+        };
+        buildings.push({
+          x: bx, y: by, w, h,
+          color: landmarkKey === 'casino' ? '#d4af37' : landmarkKey === 'club' ? '#ff4fd8' : '#8f7a5a',
+          landmark: landmarkKey, height: 3,
+        });
         continue;
       }
-      const count = random.chance(0.5) ? 2 : 1;
+
+      // Ordinary blocks get one to three buildings.
+      const count = rng.int(1, 3);
       for (let i = 0; i < count; i += 1) {
-        const bw = count === 1 ? w : w / 2 - 14;
-        const bh = count === 1 ? h : h / 2 - 14;
-        const bx0 = x0 + (count === 1 ? 0 : (i % 2) * (w / 2 + 14));
-        const by0 = y0 + (count === 1 ? 0 : Math.floor(i / 2) * (h / 2 + 14));
-        const building = {
-          x: bx0,
-          y: by0,
-          w: bw,
-          h: bh,
-          color: random.pick(BUILDING_COLORS),
-          tall: random.chance(0.3),
-        };
-        buildings.push(building);
-        const key = `${bx}:${by}`;
-        if (!byBlock.has(key)) byBlock.set(key, []);
-        byBlock.get(key).push(building);
+        const w = rng.range(70, Math.min(150, (x1 - x0) / count));
+        const h = rng.range(60, Math.min(120, y1 - y0));
+        const bx = rng.range(x0, Math.max(x0, x1 - w));
+        const by = rng.range(y0, Math.max(y0, y1 - h));
+        buildings.push({
+          x: bx, y: by, w, h,
+          color: rng.pick(BUILDING_COLORS),
+          landmark: null, height: rng.int(1, 4),
+        });
+      }
+
+      // A parking spot or two along the block's road edge, just inside the
+      // road so a car can pull out without hitting a building.
+      if (rng.chance(0.7)) {
+        parkingSpots.push({
+          x: roadCenterX(col) + ROAD_W / 2 - 12,
+          y: roadCenterY(row) + rng.range(40, 200),
+          angle: Math.PI / 2,
+        });
       }
     }
   }
 
-  // The casino and the club are tall landmarks, placed on their blocks.
-  const casino = { x: 2140, y: 1340, w: 170, h: 150, color: '#d8a93b', tall: true, name: 'Casino Del Sol' };
-  const club = { x: 1340, y: 940, w: 150, h: 130, color: '#c94a8a', tall: true, name: 'Club Neon Palms' };
-  for (const landmark of [casino, club]) {
-    buildings.push(landmark);
-    const key = blockKey(landmark.x + 10, landmark.y + 10);
-    if (!byBlock.has(key)) byBlock.set(key, []);
-    byBlock.get(key).push(landmark);
-  }
+  // The docks sit on the beach itself, east of the last road.
+  landmarks.docks = {
+    x: BEACH_X + 60, y: roadCenterY(4), w: 130, h: 90,
+    doorX: BEACH_X + 30, doorY: roadCenterY(4),
+  };
+  buildings.push({
+    x: BEACH_X + 10, y: roadCenterY(4) - 45, w: 120, h: 90,
+    color: '#7a6a55', landmark: 'docks', height: 1,
+  });
 
-  return { buildings, byBlock, parks, landmarks: LANDMARKS };
+  return { buildings, landmarks, parkingSpots, cols, rows };
 }
 
-/** A random point on a road, for spawning traffic and pedestrians. */
-export function randomRoadPoint(random) {
-  const vertical = random.chance(0.5);
-  if (vertical) {
-    const gx = random.int(1, Math.floor(WORLD.width / WORLD.roadGap) - 1) * WORLD.roadGap;
-    return { x: gx, y: random.range(100, WORLD.height - 100), axis: 'v' };
+// Push a circle out of every building it overlaps. Returns true when a
+// collision happened. Buildings are solid; roads, beach and sea are open.
+export function collideBuildings(city, x, y, radius) {
+  let hit = false;
+  for (const b of city.buildings) {
+    const cx = Math.max(b.x, Math.min(x, b.x + b.w));
+    const cy = Math.max(b.y, Math.min(y, b.y + b.h));
+    const dx = x - cx;
+    const dy = y - cy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < radius * radius) {
+      hit = true;
+      const d = Math.sqrt(d2) || 0.001;
+      const push = radius - d;
+      x += (dx / d) * push;
+      y += (dy / d) * push;
+    }
   }
-  const gy = random.int(1, Math.floor(WORLD.height / WORLD.roadGap) - 1) * WORLD.roadGap;
-  return { x: random.range(100, WORLD.width - 100), y: gy, axis: 'h' };
+  return { x, y, hit };
 }
 
-/** A random sidewalk point beside a road, for pedestrians. */
-export function randomSidewalkPoint(random) {
-  const p = randomRoadPoint(random);
-  const off = HALF_ROAD + 16;
-  if (p.axis === 'v') return { x: p.x + (random.chance(0.5) ? off : -off), y: p.y };
-  return { x: p.x, y: p.y + (random.chance(0.5) ? off : -off) };
+export function clampToWorld(x, y, margin = 20) {
+  return {
+    x: Math.max(margin, Math.min(WORLD_W - margin, x)),
+    y: Math.max(margin, Math.min(WORLD_H - margin, y)),
+  };
+}
+
+export function pointInRect(x, y, rect) {
+  return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
 }

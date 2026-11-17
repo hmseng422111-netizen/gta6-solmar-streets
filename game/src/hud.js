@@ -1,128 +1,184 @@
-// The HUD and the minimap: cash, health, wanted stars, the mission objective, ammo and
-// speed, plus a live minimap of the city in the corner. Drawing only — it reads the world
-// state and paints pixels, it changes nothing.
+// Heads-up display and minimap for Solmar Streets.
+// Drawn on the same canvas as the world, after it: cash, wanted stars,
+// the current objective, health and speed, a toast line for mission news,
+// and a live minimap in the corner showing roads, landmarks, the player,
+// police and the active objective marker.
 
-import { FIELD, FONT, PALETTE, WANTED, WORLD } from './config.js';
-import { currentObjective } from './missions.js';
-import { starsOf } from './police.js';
+import { VIEW_W, VIEW_H, WORLD_W, WORLD_H, MISSIONS } from './config.js';
+import { objectiveText } from './missions.js';
 
-const MAP = { x: FIELD.width - 218, y: 16, w: 202, h: 146 };
+const MAP_W = 210;
+const MAP_H = 158;
+const MAP_X = VIEW_W - MAP_W - 16;
+const MAP_Y = 16;
 
-function text(context, fonts, value, x, y, size, color, align) {
-  if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
-  context.font = fonts.get(size);
-  context.fillStyle = color;
-  context.textAlign = align;
-  context.textBaseline = 'top';
-  context.fillText(value, x, y);
-}
+export function drawHud(ctx, world) {
+  const player = world.player;
+  const police = world.police;
+  const missions = world.missions;
 
-function starRow(context, fonts, stars) {
-  for (let i = 0; i < WANTED.maxStars; i += 1) {
-    const x = FIELD.width - 24 - (WANTED.maxStars - 1 - i) * 30;
-    text(context, fonts, '★', x, 18, 30, i < stars ? PALETTE.wanted : '#3a4552', 'center');
+  ctx.save();
+  ctx.textBaseline = 'top';
+
+  // Cash.
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fillRect(14, 14, 190, 44);
+  ctx.fillStyle = '#7ee787';
+  ctx.font = 'bold 26px system-ui, sans-serif';
+  ctx.fillText(`$${player.cash}`, 26, 22);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '13px system-ui, sans-serif';
+  ctx.fillText('SOLMAR', 130, 24);
+  ctx.fillText('STREETS', 130, 40);
+
+  // Wanted stars.
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fillRect(14, 66, 190, 34);
+  for (let i = 0; i < 5; i += 1) {
+    ctx.fillStyle = i < police.wanted ? '#ffd60a' : 'rgba(255, 255, 255, 0.25)';
+    ctx.font = '22px system-ui, sans-serif';
+    ctx.fillText('★', 24 + i * 34, 70);
   }
-}
 
-/** The minimap: roads, the sea, the player, police, traffic and the mission marker. */
-export function drawMinimap(context, fonts, state) {
-  const { x, y, w, h } = MAP;
-  const scaleX = w / WORLD.width;
-  const scaleY = h / WORLD.height;
-  context.fillStyle = 'rgba(16,24,32,0.82)';
-  context.fillRect(x - 6, y - 6, w + 12, h + 12);
-  context.fillStyle = PALETTE.minimapBg;
-  context.fillRect(x, y, w, h);
-  // Sea along the south edge.
-  context.fillStyle = PALETTE.seaDeep;
-  context.fillRect(x, y + (WORLD.beachY / WORLD.height) * h, w, h - (WORLD.beachY / WORLD.height) * h);
-  // Roads.
-  context.strokeStyle = PALETTE.minimapRoad;
-  context.lineWidth = 2;
-  for (let gx = WORLD.roadGap; gx < WORLD.width; gx += WORLD.roadGap) {
-    context.beginPath();
-    context.moveTo(x + gx * scaleX, y);
-    context.lineTo(x + gx * scaleX, y + h);
-    context.stroke();
-  }
-  for (let gy = WORLD.roadGap; gy < WORLD.height; gy += WORLD.roadGap) {
-    context.beginPath();
-    context.moveTo(x, y + gy * scaleY);
-    context.lineTo(x + w, y + gy * scaleY);
-    context.stroke();
-  }
-  const dot = (wx, wy, color, size) => {
-    context.fillStyle = color;
-    context.fillRect(x + wx * scaleX - size / 2, y + wy * scaleY - size / 2, size, size);
-  };
-  const objective = currentObjective(state.mission);
-  if (objective && objective.x) dot(objective.x, objective.y, PALETTE.mission, 9);
-  if (state.fare && state.fare.active) dot(state.fare.x, state.fare.y, PALETTE.cash, 7);
-  for (let i = 0; i < state.police.length; i += 1) {
-    const car = state.police[i];
-    if (!car.wrecked) dot(car.x, car.y, '#5aa2ff', 5);
-  }
-  const player = state.player;
-  const px = player.inCar ? player.inCar.x : player.x;
-  const py = player.inCar ? player.inCar.y : player.y;
-  dot(px, py, PALETTE.player, 7);
-  context.strokeStyle = 'rgba(244,246,248,0.5)';
-  context.strokeRect(x - 6, y - 6, w + 12, h + 12);
-}
+  // Objective.
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  const objective = objectiveText(missions);
+  ctx.font = '15px system-ui, sans-serif';
+  const objW = Math.min(560, ctx.measureText(objective).width + 28);
+  ctx.fillRect(14, VIEW_H - 52, objW, 36);
+  ctx.fillStyle = '#ffd60a';
+  ctx.fillText(objective, 28, VIEW_H - 42);
 
-/** The HUD bar: cash, health, ammo, speed and the mission line. */
-export function drawHud(context, fonts, state) {
-  const player = state.player;
-  const stars = starsOf(state.heat);
-  context.fillStyle = 'rgba(16,24,32,0.72)';
-  context.fillRect(0, 0, FIELD.width, 64);
-  text(context, fonts, `$${state.save.cash}`, 20, 14, 30, PALETTE.cash, 'left');
   // Health bar.
-  context.fillStyle = '#3a4552';
-  context.fillRect(20, 48, 180, 10);
-  context.fillStyle = player.health > 30 ? PALETTE.cash : PALETTE.wanted;
-  context.fillRect(20, 48, 180 * Math.max(0, player.health / 100), 10);
-  text(context, fonts, `HP ${Math.max(0, Math.ceil(player.health))}`, 208, 40, 18, PALETTE.hudText, 'left');
-  starRow(context, fonts, stars);
-  if (player.inCar) {
-    const speed = Math.round(Math.abs(player.inCar.speed) * 0.18);
-    text(context, fonts, `${speed} km/h`, FIELD.width - 24, 56, 22, PALETTE.hudText, 'right');
-    text(context, fonts, player.inCar.sports ? 'Comet GT' : 'Sedan', FIELD.width - 24, 84, 18, PALETTE.hudMuted, 'right');
-  } else {
-    text(context, fonts, `Ammo ${player.ammo}`, FIELD.width - 24, 56, 22, PALETTE.hudText, 'right');
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fillRect(14, 108, 190, 18);
+  ctx.fillStyle = player.health > 30 ? '#2ecc71' : '#e74c3c';
+  ctx.fillRect(16, 110, 186 * Math.max(0, player.health / 100), 14);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.fillText(`HEALTH ${Math.max(0, Math.round(player.health))}`, 22, 111);
+
+  // Speed, when driving.
+  if (!player.onFoot && player.car) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.fillRect(VIEW_W - 150, VIEW_H - 52, 134, 36);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px system-ui, sans-serif';
+    ctx.fillText(`${Math.round(Math.abs(player.car.speed) * 0.45)} mph`, VIEW_W - 138, VIEW_H - 44);
   }
-  const objective = currentObjective(state.mission);
-  if (objective) {
-    text(context, fonts, objective.text, FIELD.width / 2, 76, 22, PALETTE.mission, 'center');
-  } else if (state.mission && state.mission.done) {
-    text(context, fonts, 'Job done — press M for the next job', FIELD.width / 2, 76, 22, PALETTE.cash, 'center');
-  } else if (state.fare && state.fare.active) {
-    text(context, fonts, `Taxi fare: take your passenger to ${state.fare.name} ($${state.fare.pay})`, FIELD.width / 2, 76, 22, PALETTE.cash, 'center');
-  } else {
-    text(context, fonts, 'Free roam — press M for a job, E near a car to drive it', FIELD.width / 2, 76, 22, PALETTE.hudMuted, 'center');
+
+  // Mission toast.
+  if (missions.toastTimer > 0 && missions.toast) {
+    ctx.font = 'bold 18px system-ui, sans-serif';
+    const w = ctx.measureText(missions.toast).width + 32;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+    ctx.fillRect((VIEW_W - w) / 2, 66, w, 38);
+    ctx.fillStyle = '#7ee787';
+    ctx.fillText(missions.toast, (VIEW_W - w) / 2 + 16, 75);
   }
-  // Toasts: short messages under the objective line.
-  if (state.toast && state.toastTimer > 0) {
-    text(context, fonts, state.toast, FIELD.width / 2, 108, 22, PALETTE.hudText, 'center');
+
+  // Vault cracking progress.
+  if (world.missions.crackTimer > 0) {
+    const frac = world.missions.crackTimer / 5;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+    ctx.fillRect(VIEW_W / 2 - 130, VIEW_H - 110, 260, 26);
+    ctx.fillStyle = '#d4af37';
+    ctx.fillRect(VIEW_W / 2 - 126, VIEW_H - 106, 252 * frac, 18);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '13px system-ui, sans-serif';
+    ctx.fillText('CRACKING THE VAULT…', VIEW_W / 2 - 126, VIEW_H - 104);
   }
-  drawMinimap(context, fonts, state);
+
+  drawMinimap(ctx, world);
+  ctx.restore();
 }
 
-/** A centred panel for the title, pause and game-over screens. */
-export function drawPanel(context, fonts, title, lines, prompt) {
-  const width = 640;
-  const height = 150 + lines.length * 36 + 70;
-  const x = (FIELD.width - width) / 2;
-  const y = (FIELD.height - height) / 2;
-  context.fillStyle = 'rgba(16,24,32,0.88)';
-  context.fillRect(x, y, width, height);
-  context.strokeStyle = PALETTE.mission;
-  context.lineWidth = 3;
-  context.strokeRect(x, y, width, height);
-  context.textBaseline = 'alphabetic';
-  text(context, fonts, title, FIELD.width / 2, y + 78, 52, PALETTE.hudText, 'center');
-  for (let i = 0; i < lines.length; i += 1) {
-    text(context, fonts, lines[i], FIELD.width / 2, y + 132 + i * 36, 22, PALETTE.hudMuted, 'center');
+function drawMinimap(ctx, world) {
+  const sx = MAP_W / WORLD_W;
+  const sy = MAP_H / WORLD_H;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(MAP_X - 4, MAP_Y - 4, MAP_W + 8, MAP_H + 8);
+  ctx.fillStyle = '#20242e';
+  ctx.fillRect(MAP_X, MAP_Y, MAP_W, MAP_H);
+
+  // Sea and beach.
+  ctx.fillStyle = '#1f6fb2';
+  ctx.fillRect(MAP_X + 2320 * sx, MAP_Y, (WORLD_W - 2440) * sx + 8, MAP_H);
+  ctx.fillStyle = '#e8d9a0';
+  ctx.fillRect(MAP_X + 2320 * sx, MAP_Y, (2440 - 2320) * sx, MAP_H);
+
+  // Roads.
+  ctx.strokeStyle = '#5a5f6b';
+  ctx.lineWidth = 3;
+  for (let c = 0; c <= 7; c += 1) {
+    const x = MAP_X + (160 + c * 320) * sx;
+    ctx.beginPath();
+    ctx.moveTo(x, MAP_Y);
+    ctx.lineTo(x, MAP_Y + MAP_H);
+    ctx.stroke();
   }
-  text(context, fonts, prompt, FIELD.width / 2, y + height - 44, 24, PALETTE.mission, 'center');
+  for (let r = 0; r <= 5; r += 1) {
+    const y = MAP_Y + (160 + r * 320) * sy;
+    ctx.beginPath();
+    ctx.moveTo(MAP_X, y);
+    ctx.lineTo(MAP_X + MAP_W, y);
+    ctx.stroke();
+  }
+
+  // Landmarks.
+  for (const [key, mark] of Object.entries(world.city.landmarks)) {
+    ctx.fillStyle = key === 'casino' ? '#d4af37' : key === 'club' ? '#ff4fd8' : '#ffffff';
+    ctx.beginPath();
+    ctx.arc(MAP_X + mark.x * sx, MAP_Y + mark.y * sy, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Active objective marker.
+  const target = objectiveTarget(world);
+  if (target) {
+    const px = MAP_X + target.x * sx;
+    const py = MAP_Y + target.y * sy;
+    ctx.fillStyle = '#ffd60a';
+    ctx.beginPath();
+    ctx.arc(px, py, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#ffd60a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(px, py, 10 + Math.sin(world.time * 4) * 3, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Police.
+  ctx.fillStyle = '#4d8dff';
+  for (const car of world.police.cars) {
+    ctx.fillRect(MAP_X + car.x * sx - 2, MAP_Y + car.y * sy - 2, 4, 4);
+  }
+
+  // Player.
+  ctx.fillStyle = '#7ee787';
+  ctx.beginPath();
+  ctx.arc(MAP_X + world.player.x * sx, MAP_Y + world.player.y * sy, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+export function objectiveTarget(world) {
+  const active = world.missions;
+  const mission = MISSIONS[active.index];
+  if (mission) {
+    const stageDef = mission.stages[active.stage];
+    if (stageDef && stageDef.landmark) {
+      const mark = world.city.landmarks[stageDef.landmark];
+      if (mark) return { x: mark.doorX, y: mark.doorY };
+    }
+  }
+  if (active.fare) {
+    return active.fare.pickedUp
+      ? { x: active.fare.dropX, y: active.fare.dropY }
+      : { x: active.fare.pickupX, y: active.fare.pickupY };
+  }
+  return null;
 }
